@@ -31,7 +31,7 @@ class Policy(nn.Module):
         x = self.fc1(inputs)
         x = F.relu(x)
         logits = self.fc2(x)
-        return F.softmax(logits)
+        return F.softmax(logits, dim=0)
 
     def act(self, inputs):
         if torch.cuda.is_available():
@@ -45,28 +45,31 @@ class Policy(nn.Module):
         self.log_probs.append(m.log_prob(action))
         return action.data[0]
     def learn(self, optimizer):
+        self.weight_reward()
         losses = []
         for log_prob, reward in zip(self.log_probs, self.rewards):
-            losses.append(log_prob*reward)
+            losses.append(-log_prob *reward)
         optimizer.zero_grad()
         losses = torch.cat(losses).sum()
         losses.backward()
         optimizer.step()
 
-        del self.rewards[:]
-        del self.log_probs[:]
+        self.rewards = list()
+        self.log_probs = list()
 
     def weight_reward(self):
         R = 0
         rewards = []
 
         for r in self.rewards[::-1]:
-            R = r + 0.99 * R
-            rewards.insert(R)
-        self.rewards = Tensor(rewards)
+            R = r + (0.99 * R)
+            rewards.insert(0, R)
+        rewards = Tensor(rewards)
+        self.rewards = (rewards - rewards.mean()) / (rewards.std() + np.finfo(np.float32).eps)
 
 def REINFORCE(args):
     """ ENV STUFF"""
+    args.seed = np.random.randint(1000)
     env = gym.make(args.env_name)
     S = env.reset()
     env.seed(args.seed)
@@ -82,19 +85,29 @@ def REINFORCE(args):
     if torch.cuda.is_available():
         model.cuda()
 
-    for i in range(int(1e6)):
-        action = model.act(S)
-        S, R, done, _ = env.step(action)
+    for i in range(int(10000)):
+        running_reward = []
+        for j in range(int(1e4)):
+            action = model.act(S)
+            S, R, done, _ = env.step(action)
 
-        model.rewards.append(R)
+            model.rewards.append(R)
 
-        if args.render:
-            env.render()
-        if done == True:
-            if(i%20):
-                print("EPISODE REWARD:", sum(model.rewards))
-            model.learn(optimizer)
-            S = env.reset()
+            if args.render:
+                env.render()
+            if done == True:
+                running_reward.append(sum(model.rewards))
+                if j%10==0:
+                    print("EPISODE REWARD:", sum(running_reward)/len(running_reward))
+                model.learn(optimizer)
+                S = env.reset()
+                break
+
+        if sum(running_reward)/len(running_reward) > env.spec.reward_threshold:
+            print("Solved! Running reward is now {} and "
+                  "the last episode runs to {} time steps!".format(running_reward, i))
+            break
+
 
 def main():
     """ ARGUMENTS """
